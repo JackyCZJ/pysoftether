@@ -13,7 +13,7 @@ Usage example
 ```python
 from softether.api import SoftEtherAPI
 
-api = SoftEtherAPI('vpn.whitehouse.gov', 443, '123456password')
+api = SoftEtherAPI('https://vpn.whitehouse.gov', 443, '123456password')
 
 
 print(api.test())

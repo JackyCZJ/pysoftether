@@ -19,6 +19,8 @@ def serialize(data):
                 new_data[key + "_bin"] = data[key][1]
             elif data[key][0] == "ustring":
                 new_data[key + "_utf"] = data[key][1]
+            elif data[key][0] == "int32":
+                new_data[key + "_int32"] = data[key][1]
             elif data[key][0] == "int64":
                 new_data[key + "_int64"] = data[key][1]
 
@@ -36,11 +38,13 @@ class SoftEtherAPIConnector(object):
     host = None
     port = None
 
-    def __init__(self, host, port, password, hub=None):
+    def __init__(self, host, port, password, suffix="/api/", hub=None, verify=True):
         self.host = host
         self.port = port
         self.password = password
         self.hub = hub
+        self.suffix = suffix
+        self.verify = verify
 
     def send_http_request(self, body, headers=None):
         if headers is None:
@@ -53,10 +57,9 @@ class SoftEtherAPIConnector(object):
         }
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         try:
-            response = requests.post("https://" + self.host + ":" + str(self.port) + "/api/",
-                                        headers=headers, data=json.dumps(body), verify=False)
-            data = response.text
-            return data
+            response = requests.post(self.host + ":" + str(self.port) + self.suffix,
+                                        headers=headers, data=json.dumps(body), verify=self.verify)
+            return response.json()
         except Exception as e:
             raise SoftEtherAPIException(e)
 
@@ -66,8 +69,8 @@ class SoftEtherAPI(object):
     socket = None
     connect_response = {}
 
-    def __init__(self, hostname, port, password):
-        self.socket = SoftEtherAPIConnector(hostname, port, password)
+    def __init__(self, hostname, port, password,verify=True):
+        self.socket = SoftEtherAPIConnector(hostname, port, password, verify, hub=None)
 
     def call_method(self, function_name, payload=None):
         data = {
