@@ -1,11 +1,12 @@
-pysoftether
+pysoftether_jsonrpc
 ===========
 
 SoftEther VPN Server Python Management API.
 
 Python implementation of SoftEther VPN management protocol. Can be used for controlling remote server, automation or statistics.
 
-This project is a fork of [mindcollapse/SoftEtherPy](https://github.com/mindcollapse/SoftEtherPy) which is unmaintained, therefore I decided to rename the project and create new pypi package.
+Fork form [vandot/pysoftether](https://github.com/vandot/pysoftether), merge form socket api to json rpc.
+NO with any test.
 
 Usage example
 -------------
@@ -14,8 +15,6 @@ from softether.api import SoftEtherAPI
 
 api = SoftEtherAPI('vpn.whitehouse.gov', 443, '123456password')
 
-api.connect()
-api.authenticate()
 
 print(api.test())
 # {'UniStrValue': ['world\x00'], 'IntValue': [1], 'Int64Value': [2], 'StrValue': ['1']}
@@ -26,7 +25,6 @@ print(api.get_server_info())
 print(api.get_server_status())
 # {'TotalMemory': [0], 'NumSessionsTotal': [0], 'NumTcpConnectionsRemote': [0], 'Send.UnicastBytes': [577743326], 'Recv.BroadcastCount': [1224620], 'NumHubStatic': [0], 'FreePhys': [0], 'ServerType': [0], 'UsedPhys': [0], 'NumHubDynamic': [0], 'Send.BroadcastCount': [43225], 'NumTcpConnections': [49], 'AssignedBridgeLicensesTotal': [0], 'Send.UnicastCount': [1746888], 'AssignedBridgeLicenses': [0], 'NumSessionsLocal': [0], 'AssignedClientLicenses': [0], 'Send.BroadcastBytes': [3140072], 'NumHubStandalone': [1], 'Recv.UnicastCount': [1752958], 'NumHubTotal': [1], 'AssignedClientLicensesTotal': [0], 'NumGroups': [0], 'Recv.BroadcastBytes': [74615494], 'CurrentTime': [1418792416592], 'UsedMemory': [0], 'Recv.UnicastBytes': [580004599], 'FreeMemory': [0], 'CurrentTick': [3039999042], 'TotalPhys': [0], 'NumSessionsRemote': [0], 'NumUsers': [3], 'StartTime': [1415753738050], 'NumTcpConnectionsLocal': [49], 'NumIpTables': [1], 'NumMacTables': [1]}
 
-api.disconnect()
 ```
 
 Create user

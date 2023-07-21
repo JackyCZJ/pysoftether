@@ -1,87 +1,64 @@
-import ssl
-import socket
 import hashlib
 import base64
+import requests
+import json
+import urllib3
 
-from .protocol import SoftEtherProtocol
-from .errors import strerror
+
+def serialize(data):
+    new_data = {}
+    for key in data:
+        if isinstance(data[key],str):
+            if data[key][0] == "string":
+                new_data[key + "_str"] = data[key][1]
+            elif data[key][0] == "int":
+                new_data[key + "_int"] = data[key][1]
+            elif data[key][0] == "bool":
+                new_data[key + "_bool"] = data[key][1]
+            elif data[key][0] == "raw":
+                new_data[key + "_bin"] = data[key][1]
+            elif data[key][0] == "ustring":
+                new_data[key + "_utf"] = data[key][1]
+            elif data[key][0] == "int64":
+                new_data[key + "_int64"] = data[key][1]
+
+            else:
+                raise Exception("Unknown type")
+
+    return new_data
+
 
 class SoftEtherAPIException(Exception):
     pass
 
-def python27_exit(socket):
-    print ("tada")
-
 
 class SoftEtherAPIConnector(object):
-    socket = None
-
     host = None
     port = None
 
-    def __init__(self, host, port):
-        self.socket = ssl.wrap_socket(socket.socket(socket.AF_INET, socket.SOCK_STREAM), cert_reqs=ssl.CERT_NONE)
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-
+    def __init__(self, host, port, password, hub=None):
         self.host = host
         self.port = port
+        self.password = password
+        self.hub = hub
 
-    def connect(self):
-        self.socket.connect((self.host, self.port))
-
-    def send_http_request(self, method, target, body, headers=None):
+    def send_http_request(self, body, headers=None):
         if headers is None:
             headers = {}
-
-        header = '{0} {1} HTTP/1.1\r\n'.format(method.upper(), target)
-
-        for header_name, header_value in headers.items():
-            header += '{0}: {1}\r\n'.format(header_name, header_value)
-
-        if 'Content-Length' not in headers:
-            header += '{0}: {1}\r\n'.format('Content-Length', len(body))
-
-        self.socket.write(str.encode('{0}\r\n'.format(header)))
-        return self.socket.write(body) == len(body)
-
-    def get_http_response(self):
+        headers = {
+            'Content-Type': 'application/json; charset=utf-8',
+            "Access-Control-Allow-Credentials": "true",
+            "X-VPNADMIN-HUBNAME": self.hub is None and "administrator" or self.hub,
+            "X-VPNADMIN-PASSWORD": self.password,
+        }
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         try:
-            socket_file = self.socket.makefile('rb')
-
-            response_code = int(socket_file.readline()[9:12])
-            response_headers = {}
-            response_length = 0
-
-            while True:
-                header_line = socket_file.readline()
-
-                if header_line == b'\r\n':
-                    break
-
-                header_name, header_value = header_line.decode('ascii', 'ignore').strip().split(': ')
-                header_name = header_name.lower()
-
-                response_headers[header_name] = header_value
-
-                if header_name == 'content-length':
-                    response_length = int(header_value)
-
-            response_body = socket_file.read(response_length)
-
-            return {
-                'code': response_code,
-                'headers': response_headers,
-                'length': response_length,
-                'body': response_body,
-            }
-        finally:
-            socket_file.close()
-
-    def get_socket(self):
-        return self.socket
-
-    def close(self):
-        self.socket.close()
+            response = requests.post("https://" + self.host + ":" + str(self.port) + "/api/",
+                                        headers=headers, data=json.dumps(body), verify=False)
+            data = response.text
+            return data
+        except Exception as e:
+            raise SoftEtherAPIException(e)
 
 
 class SoftEtherAPI(object):
@@ -89,105 +66,25 @@ class SoftEtherAPI(object):
     socket = None
     connect_response = {}
 
-    global_headers = {
-        'Keep-Alive': 'timeout=15; max=19',
-        'Connection': 'Keep-Alive',
-        'Content-Type': 'application/octet-stream'
-    }
-
-    def __init__(self, hostname, port, admin_password):
-        self.admin_password = admin_password
-        self.socket = SoftEtherAPIConnector(hostname, port)
-
-    def connect(self):
-        self.socket.connect()
-
-        if not self.socket.send_http_request('POST', '/vpnsvc/connect.cgi', b'VPNCONNECT', self.global_headers):
-            raise SoftEtherAPIException('api_vpnconnect_error')
-
-        response = self.socket.get_http_response()
-
-        if not response['code'] == 200:
-            raise SoftEtherAPIException('api_connect_non_200')
-
-        self.connect_response = SoftEtherProtocol(response['body']).deserialize()
-
-        if 'random' not in self.connect_response:
-            raise SoftEtherAPIException('api_connect_missing_random')
-
-    def authenticate(self, hub_name=None):
-        auth_payload = {
-            'method': ('string', ['admin']),
-            'client_str': ('string', ['pysoftether']),
-            'client_ver': ('int', [1]),
-            'client_build': ('int', [0]),
-        }
-
-        if hub_name is not None:
-            auth_payload['hubname'] = ('string', [hub_name])
-
-        hashed_password = hashlib.new('sha')
-        hashed_password.update(str.encode(self.admin_password))
-        hashed_password = hashed_password.digest()
-
-        secure_password = hashlib.new('sha')
-        secure_password.update(hashed_password)
-        secure_password.update(self.connect_response['random'][0])
-
-        auth_payload['secure_password'] = ('raw', [secure_password.digest()])
-
-        if not self.socket.send_http_request('POST', '/vpnsvc/vpn.cgi',
-                                             SoftEtherProtocol().serialize(auth_payload), self.global_headers):
-            raise SoftEtherAPIException('api_authenticate_error')
-
-        response = self.socket.get_http_response()
-
-        if not response['code'] == 200:
-            raise SoftEtherAPIException('api_authenticate_non_200')
-
-        authenticate_response = SoftEtherProtocol(response['body']).deserialize()
-
-        if 'error' in authenticate_response:
-            raise SoftEtherAPIException('api_authenticate_error_{0}'.format(authenticate_response['error'][0]))
-
-    def disconnect(self):
-        self.socket.close()
+    def __init__(self, hostname, port, password):
+        self.socket = SoftEtherAPIConnector(hostname, port, password)
 
     def call_method(self, function_name, payload=None):
-        if payload is None:
-            payload = {}
+        data = {
+            "jsonrpc": "2.0",
+            "id": "rpc_call_id",
+            "method": function_name,
+            "params":  {
+                    'IntValue_int': [0],
+                }
+        }
+        if payload is not None:
+            data['params'] = serialize(payload)
 
-        for param, value in list(payload.items()):
-            if value[1] is None or (isinstance(value[1], list) and None in value[1]):
-                del payload[param]
+        response = self.socket.send_http_request(data)
 
-        os_socket = self.socket.get_socket()
-
-        payload['function_name'] = ('string', [function_name])
-        payload_serialized = SoftEtherProtocol().serialize(payload)
-
-        payload_length = SoftEtherProtocol()
-        payload_length.set_int(len(payload_serialized))
-
-        os_socket.write(payload_length.payload)
-        os_socket.write(payload_serialized)
-
-        data_length = os_socket.read(4)
-
-        if len(data_length) != 4:
-            raise SoftEtherAPIException('api_call_wrong_data_length')
-
-        data_length_as_int = SoftEtherProtocol(data_length).get_int()
-
-        response_buffer = os_socket.read(data_length_as_int)
-
-        if len(response_buffer) != data_length_as_int:
-            raise SoftEtherAPIException('api_call_wrong_response_length')
-
-        response = SoftEtherProtocol(response_buffer).deserialize()
-
-        if 'error' in response:
-            response['error'] = [strerror(errno) for errno in response['error']]
+        # if 'error' in response:
+        #     response['error'] = [strerror(errno) for errno in response['error']]
 
         return response
 
@@ -509,7 +406,8 @@ class SoftEtherAPI(object):
 
         return self.call_method('GetLinkStatus', payload)
 
-    def add_access(self, hub_name=None, id=None, note=None, active=None, priority=None, discard=None, src_ip_address=None,
+    def add_access(self, hub_name=None, id=None, note=None, active=None, priority=None, discard=None,
+                   src_ip_address=None,
                    src_subnet_mask=None, dest_ip_address=None, dest_subnet_mask=None, protocol=None,
                    src_port_start=None, src_port_end=None, dest_port_start=None, dest_port_end=None,
                    src_username=None, dest_username=None, src_mac_address=None, src_mac_mask=None,
@@ -578,7 +476,9 @@ class SoftEtherAPI(object):
 
         return self.call_method('SetAccessList', payload)
 
-    def create_user(self, hub_name=None, name=None, auth_type=None, password=None, user_cert=None, common_name=None, radius_user=None, nt_user=None, group_name=None, realname=None, note=None, created_time=None, updated_time=None, expire_time=None, num_login=None):
+    def create_user(self, hub_name=None, name=None, auth_type=None, password=None, user_cert=None, common_name=None,
+                    radius_user=None, nt_user=None, group_name=None, realname=None, note=None, created_time=None,
+                    updated_time=None, expire_time=None, num_login=None):
         if password:
             hashed_key = hashlib.new('sha')
             hashed_key.update(str.encode(password))
@@ -614,13 +514,15 @@ class SoftEtherAPI(object):
 
         return self.call_method('CreateUser', payload)
 
-    def set_user(self, hub_name=None, name=None, auth_type=None, password=None, user_cert=None, common_name=None, radius_user=None, nt_user=None, group_name=None, realname=None, note=None, created_time=None, updated_time=None, expire_time=None, num_login=None):
+    def set_user(self, hub_name=None, name=None, auth_type=None, password=None, user_cert=None, common_name=None,
+                 radius_user=None, nt_user=None, group_name=None, realname=None, note=None, created_time=None,
+                 updated_time=None, expire_time=None, num_login=None):
         if password:
-            hashed_key = hashlib.new('sha')
+            hashed_key = hashlib.new('sha0')
             hashed_key.update(str.encode(password))
             hashed_key.update(str.encode(str.upper(name)))
             hashed_key = hashed_key.digest()
-            ntlm_secure_hash = hashlib.new('sha')
+            ntlm_secure_hash = hashlib.new('sha0')
             ntlm_secure_hash.update(hashed_key)
             ntlm_secure_hash.update(self.connect_response['random'][0])
             ntlm_secure_hash = ntlm_secure_hash.digest()
@@ -723,7 +625,8 @@ class SoftEtherAPI(object):
 
         return self.call_method('EnumSession', payload)
 
-    def get_session_status(self, hub_name=None, name=None, username=None, group_name=None, real_username=None, session_status_client_ip=None):
+    def get_session_status(self, hub_name=None, name=None, username=None, group_name=None, real_username=None,
+                           session_status_client_ip=None):
         payload = {
             'HubName': ('string', [hub_name]),
             'Name': ('string', [name]),
@@ -800,13 +703,13 @@ class SoftEtherAPI(object):
 
     # NOTE: mac_address, ip, mask, use_nat, use_dhcp, apply_dhcp_push_routes, save_log are
     def set_secure_nat_option(self, hub_name=None, use_nat=1, use_dhcp=1, save_log=1,
-                            apply_dhcp_push_routes=1, mac_address=None, ip=None, mask=None,
-                            mtu=0, nat_tcp_timeout=0, nat_udp_timeout=0,
-                            dhcp_lease_ip_start=0, dhcp_lease_ip_end=0,
-                            dhcp_subnet_mask=0, dhcp_expire_time_span=0,
-                            dhcp_gateway_address=0, dhcp_dns_server_address=0,
-                            dhcp_dns_server_address2=0, dhcp_domain_name="",
-                            dhcp_push_routes=""):
+                              apply_dhcp_push_routes=1, mac_address=None, ip=None, mask=None,
+                              mtu=0, nat_tcp_timeout=0, nat_udp_timeout=0,
+                              dhcp_lease_ip_start=0, dhcp_lease_ip_end=0,
+                              dhcp_subnet_mask=0, dhcp_expire_time_span=0,
+                              dhcp_gateway_address=0, dhcp_dns_server_address=0,
+                              dhcp_dns_server_address2=0, dhcp_domain_name="",
+                              dhcp_push_routes=""):
         payload = {
             'RpcHubName': ('string', [hub_name]),
             'MacAddress': ('raw', [mac_address]),
@@ -1259,4 +1162,3 @@ class SoftEtherAPI(object):
         }
 
         return self.call_method('SetDDnsInternetSettng', payload)
-
