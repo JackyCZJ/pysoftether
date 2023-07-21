@@ -69,8 +69,8 @@ class SoftEtherAPI(object):
     socket = None
     connect_response = {}
 
-    def __init__(self, hostname, port, password,verify=True):
-        self.socket = SoftEtherAPIConnector(hostname, port, password, verify, hub=None)
+    def __init__(self, hostname, port, password, verify=True, suffix="/api/"):
+        self.socket = SoftEtherAPIConnector(hostname, port, password, suffix=suffix, verify=verify, hub=None)
 
     def call_method(self, function_name, payload=None):
         data = {
