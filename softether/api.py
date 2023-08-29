@@ -1,32 +1,75 @@
-import hashlib
 import base64
+from softether.sha0 import sha0Hash
+
 import requests
 import json
 import urllib3
+import datetime
+from softether.errors import ERRORS
+
+
+def sha0(data):
+    sha = sha0Hash()
+    sha.update(data)
+    return sha
+
+def _left_rotate(x, n):
+    return ((x << n) | (x >> (32 - n))) & 0xFFFFFFFF
+
+
+def from_utf(message):
+    raw = ''
+    i = 0
+    while i < len(message):
+        char_code = ord(message[i])
+        if char_code < 0x80:
+            raw += chr(char_code)
+        elif char_code < 0x800:
+            raw += chr(0xc0 | (char_code >> 6))
+            raw += chr(0x80 | (char_code & 0x3f))
+        elif char_code < 0xd800 or char_code >= 0xe000:
+            raw += chr(0xe0 | (char_code >> 12))
+            raw += chr(0x80 | ((char_code >> 6) & 0x3f))
+            raw += chr(0x80 | (char_code & 0x3f))
+        else:
+            i += 1
+            char_code = 0x10000 + (((char_code & 0x3ff) << 10) | (ord(message[i]) & 0x3ff))
+            raw += chr(0xf0 | (char_code >> 18))
+            raw += chr(0x80 | ((char_code >> 12) & 0x3f))
+            raw += chr(0x80 | ((char_code >> 6) & 0x3f))
+            raw += chr(0x80 | (char_code & 0x3f))
+        i += 1
+    return raw
 
 
 def serialize(data):
     new_data = {}
     for key in data:
-        if isinstance(data[key],str):
-            if data[key][0] == "string":
-                new_data[key + "_str"] = data[key][1]
-            elif data[key][0] == "int":
-                new_data[key + "_int"] = data[key][1]
-            elif data[key][0] == "bool":
-                new_data[key + "_bool"] = data[key][1]
-            elif data[key][0] == "raw":
-                new_data[key + "_bin"] = data[key][1]
-            elif data[key][0] == "ustring":
-                new_data[key + "_utf"] = data[key][1]
-            elif data[key][0] == "int32":
-                new_data[key + "_int32"] = data[key][1]
-            elif data[key][0] == "int64":
-                new_data[key + "_int64"] = data[key][1]
-
+        if data[key][1] is None or data[key][1] == [None]:
+            continue
+        value = data[key][1][0]
+        if data[key][0] == "string":
+            new_data[key + "_str"] = value
+        elif data[key][0] == "int":
+            if isinstance(data[key][1], bool):
+                new_data[key + "_bool"] = bool(value)
             else:
-                raise Exception("Unknown type")
-
+                new_data[key + "_u32"] = value
+        elif data[key][0] == "bool":
+            new_data[key + "_bool"] = value
+        elif data[key][0] == "raw":
+            new_data[key + "_bin"] = value
+        elif data[key][0] == "ustring":
+            new_data[key + "_utf"] = value
+        elif data[key][0] == "int64":
+            new_data[key + "_int64"] = value
+        elif data[key][0] == "uint64":
+            new_data[key + "_u64"] = value
+        elif data[key][0] == "datetime":
+            new_data[key + "_dt"] = (datetime.datetime.fromtimestamp(value)
+                                     .isoformat(timespec='milliseconds'))
+        else:
+            raise Exception("Unknown type")
     return new_data
 
 
@@ -37,8 +80,12 @@ class SoftEtherAPIException(Exception):
 class SoftEtherAPIConnector(object):
     host = None
     port = None
+    password = None
+    hub = None
+    suffix = None
+    verify = True
 
-    def __init__(self, host, port, password, suffix="/api/", hub=None, verify=True):
+    def __init__(self, host, port, password, suffix, hub=None, verify=True):
         self.host = host
         self.port = port
         self.password = password
@@ -58,10 +105,26 @@ class SoftEtherAPIConnector(object):
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         try:
             response = requests.post(self.host + ":" + str(self.port) + self.suffix,
-                                        headers=headers, data=json.dumps(body), verify=self.verify)
+                                     headers=headers, data=json.dumps(body), verify=self.verify)
             return response.json()
         except Exception as e:
             raise SoftEtherAPIException(e)
+
+
+def key_beautify(data):
+    new_data = {}
+    for key in data:
+        new_data[key.split("_", 1)[0]] = data[key]
+        if type(data[key]) == dict:
+            new_data[key.split("_", 1)[0]] = key_beautify(data[key])
+        if (type(data[key])) == list:
+            new_data[key.split("_", 1)[0]] = []
+            for item in data[key]:
+                if type(item) == dict:
+                    new_data[key.split("_", 1)[0]].append(key_beautify(item))
+                else:
+                    new_data[key.split("_", 1)[0]].append(item)
+    return new_data
 
 
 class SoftEtherAPI(object):
@@ -77,31 +140,29 @@ class SoftEtherAPI(object):
             "jsonrpc": "2.0",
             "id": "rpc_call_id",
             "method": function_name,
-            "params":  {
-                    'IntValue_int': [0],
-                }
+            "params": {
+                'IntValue_int': [0],
+            }
         }
+
         if payload is not None:
             data['params'] = serialize(payload)
+        try:
+            # print(json.dumps(data))
+            result = self.socket.send_http_request(data)
+            if "result" in result:
+                result = key_beautify(result["result"])
+                return result
+            elif "error" in result:
+                if result["error"]["code"] in ERRORS:
+                    raise SoftEtherAPIException(ERRORS[result["error"]["code"]])
+                else:
+                    raise SoftEtherAPIException(result["error"]["message"])
+        except Exception as e:
+            return {"error": str(e)}
 
-        response = self.socket.send_http_request(data)
-
-        # if 'error' in response:
-        #     response['error'] = [strerror(errno) for errno in response['error']]
-
-        return response
-
-    # Methods start here
-
-    def test(self, int_value=1, int64_value=2, string_value='hello', ustring_value='world'):
-        payload = {
-            'IntValue': ('int', [int_value]),
-            'Int64Value': ('int64', [int64_value]),
-            'StrValue': ('string', [string_value]),
-            'UniStrValue': ('ustring', [ustring_value]),
-        }
-
-        return self.call_method('Test', payload)
+    def test(self):
+        return self.call_method("Test")
 
     def get_server_info(self):
         return self.call_method('GetServerInfo')
@@ -195,22 +256,21 @@ class SoftEtherAPI(object):
 
         return self.call_method('SetServerCipher', payload)
 
-    def create_hub(self, hub_name=None, hashed_password=None, secure_password=None, online=None, hub_type=None):
+    def create_hub(self, hub_name=None, password=None, online=False, hub_type=None):
         payload = {
             'HubName': ('string', [hub_name]),
-            'HashedPassword': ('raw', [hashed_password]),
-            'SecurePassword': ('raw', [secure_password]),
+            'AdminPasswordPlainText': ('string', [password]),
             'Online': ('int', [online]),
+            'NoEnum': ('int', [True]),
             'HubType': ('int', [hub_type])
         }
 
         return self.call_method('CreateHub', payload)
 
-    def set_hub(self, hub_name=None, hashed_password=None, secure_password=None, online=None, hub_type=None):
+    def set_hub(self, hub_name=None, password=None, online=None, hub_type=None):
         payload = {
             'HubName': ('string', [hub_name]),
-            'HashedPassword': ('raw', [hashed_password]),
-            'SecurePassword': ('raw', [secure_password]),
+            'AdminPasswordPlainText': ('string', [password]),
             'Online': ('int', [online]),
             'HubType': ('int', [hub_type])
         }
@@ -367,30 +427,88 @@ class SoftEtherAPI(object):
 
         return self.call_method('RenameLink', payload)
 
-    def create_link(self, hub_name_ex=None, online=None, check_server_cert=None, server_cert=None):
+    def create_link(self, hub_name_ex=None, hub_name=None, online=None, hostname=None, port=None,account_name=None,
+                    username=None,auth_type=None, password=None, no_udp_acceleration=None, use_encrypt=None,
+                    use_compress=None,half_connection=None,disable_qos=None):   
         payload = {
             'HubName_Ex': ('string', [hub_name_ex]),
-            'Online': ('int', [online]),
-            'CheckServerCert': ('int', [check_server_cert]),
-            'ServerCert': ('raw', [server_cert])
+            'HubName': ('string', [hub_name]),
+            'AccountName': ('ustring', [account_name]),
+            'Online': ('bool', [online]),
+            'Hostname': ('string', [hostname]),
+            'Port': ('int', [port]),
+            'AuthType': ('int', [auth_type]),
+            'Username': ('string', [username]),
+            'NoUdpAcceleration': ('bool', [no_udp_acceleration]),
+            'UseEncrypt': ('bool', [use_encrypt]),
+            'UseCompress': ('bool', [use_compress])
         }
+        if half_connection is not None:
+            payload.update({'HalfConnection': ('bool', [half_connection])})
+        
+        if disable_qos is not None:
+            payload.update({'DisableQoS': ('bool', [disable_qos])})
+            
+        if auth_type == 1:
+            sha = sha0Hash()
+            sha.update(password.encode('UTF-8') + username.upper().encode('UTF-8'))
+            hash_password = sha.digest()
+            hash_password = base64.b64encode(hash_password).decode('UTF-8')
+            payload.update({'HashedPassword': ('raw', [hash_password])})
+        elif auth_type == 2:
+            payload.update({'PlainPassword': ('string', [password])})
 
         return self.call_method('CreateLink', payload)
 
-    def get_link(self, hub_name_ex=None):
+    def get_link(self, hub_name_ex=None, account_name=""):
         payload = {
-            'HubName_Ex': ('string', [hub_name_ex])
+            'HubName_Ex': ('string', [hub_name_ex]),
+            'AccountName': ('ustring', [account_name])
         }
 
         return self.call_method('GetLink', payload)
 
-    def set_link(self, hub_name_ex=None, online=None, check_server_cert=None, server_cert=None):
+    def set_link(self, hub_name_ex=None, online=None, auth_type=1, username=None,
+                 expire_time=None,account_name=None,server_cert=None,check_server_cert=None,
+                 password=None, no_udp_acceleration=None, use_encrypt=None, use_compress=False, policy=None):
+        policy = policy or {}
+        access = True
+        sha = sha0Hash()
+        sha.update(password.encode('UTF-8') + username.upper().encode('UTF-8'))
+        hash_password = sha.digest()
+        hashed_password = base64.b64encode(hash_password).decode('UTF-8')
+
         payload = {
             'HubName_Ex': ('string', [hub_name_ex]),
             'Online': ('int', [online]),
-            'CheckServerCert': ('int', [check_server_cert]),
-            'ServerCert': ('raw', [server_cert])
+            "AccountName": ('ustring', [account_name]),
+            'ExpireTime': ('datetime', [expire_time]),
+            'AuthType': ('int', [auth_type]),
+            'Username': ('string', [username]),
+            'HashedPassword': ('raw', [hashed_password]),
+            'NoUdpAcceleration': ('bool', [no_udp_acceleration]),
+            'UseEncrypt': ('bool', [use_encrypt]),
+            'UseCompress': ('bool', [use_compress]),
+
         }
+        
+        if check_server_cert:
+            payload.update({'CheckServerCert': ('bool', [check_server_cert])})
+            payload.update({'ServerCert': ('raw', [server_cert])})
+
+        if policy is not None:
+            access = policy.get('Access')
+            max_download = policy.get('MaxDownload')
+            max_upload = policy.get('MaxUpload')
+            max_connection = policy.get('MaxConnection')
+            vlan_id = policy.get('VlanId')
+            payload.update({
+                'Access': ('bool', [access]),
+                'MaxDownload': ('int', [max_download * 1024 * 1024]),
+                'MaxUpload': ('int', [max_upload * 1024 * 1024]),
+                'MaxConnection': ('int', [max_connection]),
+                'VlanId': ('int', [vlan_id])
+            })
 
         return self.call_method('SetLink', payload)
 
@@ -479,53 +597,61 @@ class SoftEtherAPI(object):
 
         return self.call_method('SetAccessList', payload)
 
-    def create_user(self, hub_name=None, name=None, auth_type=None, password=None, user_cert=None, common_name=None,
-                    radius_user=None, nt_user=None, group_name=None, realname=None, note=None, created_time=None,
+    def create_user(self, hub_name=None, name=None, auth_type=1, password=None,
+                    note=None, created_time=None,
+                    policy=None,radius_user=None,nt_user=None,
                     updated_time=None, expire_time=None, num_login=None):
-        if password:
-            hashed_key = hashlib.new('sha')
-            hashed_key.update(str.encode(password))
-            hashed_key.update(str.encode(str.upper(name)))
-            hashed_key = hashed_key.digest()
-            ntlm_secure_hash = hashlib.new('sha')
-            ntlm_secure_hash.update(hashed_key)
-            ntlm_secure_hash.update(self.connect_response['random'][0])
-            ntlm_secure_hash = ntlm_secure_hash.digest()
-        else:
-            hashed_key = None
-            ntlm_secure_hash = None
-        if user_cert:
-            user_cert = base64.b64decode(user_cert.encode())
+
         payload = {
             'HubName': ('string', [hub_name]),
             'Name': ('string', [name]),
-            'GroupName': ('string', [group_name]),
-            'Realname': ('ustring', [realname]),
             'Note': ('ustring', [note]),
-            'CreatedTime': ('int64', [created_time]),
-            'UpdatedTime': ('int64', [updated_time]),
-            'ExpireTime': ('int', [expire_time]),
+            'CreatedTime': ('datetime', [created_time]),
+            'UpdatedTime': ('datetime', [updated_time]),
+            'ExpireTime': ('datetime', [expire_time]),
             'NumLogin': ('int', [num_login]),
             'AuthType': ('int', [auth_type]),
-            'HashedKey': ('raw', [hashed_key]),
-            'NtLmSecureHash': ('raw', [ntlm_secure_hash]),
-            'UserX': ('raw', [user_cert]),
-            'CommonName': ('ustring', [common_name]),
-            'RadiusUsername': ('string', [radius_user]),
-            'NtUsername': ('string', [nt_user])
         }
+        if policy is not None:
+            access = policy.get('Access', True)
+            max_download = policy.get('MaxDownload')
+            max_upload = policy.get('MaxUpload')
+            max_connection = policy.get('MaxConnection', 8)
+            vlan_id = policy.get('VlanId')
+            max_download = int(max_download) if max_download else 0
+            max_upload = int(max_upload) if max_upload else 0
+            payload.update({
+                'policy:Access': ('bool', [access]),
+                'policy:MaxDownload': ('int', [max_download * 1024 * 1024]),
+                'policy:MaxUpload': ('int', [max_upload * 1024 * 1024]),
+                'policy:MaxConnection': ('int', [max_connection]),
+                'policy:VlanId': ('int', [vlan_id])
+            })
+
+        if auth_type == 1:
+            payload.update({
+                'Auth_Password': ('string', [password])
+            })
+        elif auth_type == 4:
+            payload.update({
+                'RadiusUsername': ('string', [radius_user])
+            })
+        elif auth_type == 5:
+            payload.update({
+                'NtUsername': ('string', [nt_user])
+            })
 
         return self.call_method('CreateUser', payload)
 
     def set_user(self, hub_name=None, name=None, auth_type=None, password=None, user_cert=None, common_name=None,
                  radius_user=None, nt_user=None, group_name=None, realname=None, note=None, created_time=None,
-                 updated_time=None, expire_time=None, num_login=None):
+                 updated_time=None, expire_time=None, num_login=None, policy=None):
         if password:
-            hashed_key = hashlib.new('sha0')
+            hashed_key = sha0(password)
             hashed_key.update(str.encode(password))
             hashed_key.update(str.encode(str.upper(name)))
             hashed_key = hashed_key.digest()
-            ntlm_secure_hash = hashlib.new('sha0')
+            ntlm_secure_hash = sha0(password)
             ntlm_secure_hash.update(hashed_key)
             ntlm_secure_hash.update(self.connect_response['random'][0])
             ntlm_secure_hash = ntlm_secure_hash.digest()
@@ -550,8 +676,22 @@ class SoftEtherAPI(object):
             'UserX': ('raw', [user_cert]),
             'CommonName': ('ustring', [common_name]),
             'RadiusUsername': ('string', [radius_user]),
-            'NtUsername': ('string', [nt_user])
+            'NtUsername': ('string', [nt_user]),
+            'UsePolicy': ('bool', [policy is not None]),
         }
+        if policy is not None:
+            access = policy.get('Access', True)
+            max_download = policy.get('MaxDownload')
+            max_upload = policy.get('MaxUpload')
+            max_connection = policy.get('MaxConnection', 8)
+            vlan_id = policy.get('VlanId')
+            payload.update({
+                'policy:Access': ('bool', [access]),
+                'policy:MaxDownload': ('int', [max_download * 1024 * 1024]),
+                'policy:MaxUpload': ('int', [max_upload * 1024 * 1024]),
+                'policy:MaxConnection': ('int', [max_connection]),
+                'policy:VlanId': ('int', [vlan_id])
+            })
 
         return self.call_method('SetUser', payload)
 
@@ -769,11 +909,14 @@ class SoftEtherAPI(object):
     def enum_ethernet(self):
         return self.call_method('EnumEthernet')
 
-    def add_local_bridge(self, device_name=None, hub_name_lb=None, tap_mode=None):
+    def add_local_bridge(self, device_name=None, hub_name_lb=None, tap_mode=None,
+                         online=False, active=False):
         payload = {
             'DeviceName': ('string', [device_name]),
             'HubNameLB': ('string', [hub_name_lb]),
-            'TapMode': ('int', [tap_mode])
+            'Online': ('bool', [online]),  # NOTE: always 0
+            'Active': ('bool', [active]),  # NOTE: always 0
+            'TapMode': ('int', [bool(tap_mode)])
         }
 
         return self.call_method('AddLocalBridge', payload)
@@ -782,7 +925,7 @@ class SoftEtherAPI(object):
         payload = {
             'DeviceName': ('string', [device_name]),
             'HubNameLB': ('string', [hub_name_lb]),
-            'TapMode': ('int', [tap_mode])
+            'TapMode': ('int', [bool(tap_mode)])
         }
 
         return self.call_method('DeleteLocalBridge', payload)
